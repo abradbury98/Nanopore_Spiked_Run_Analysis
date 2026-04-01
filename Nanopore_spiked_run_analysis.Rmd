@@ -1,0 +1,744 @@
+---
+title: "Relative Abundance Analysis from Kraken2 Reports"
+author: "Enhanced Version"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: show
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+# =============================================================================
+# Relative Abundance Analysis from Kraken2 Reports
+# For Nanopore Sequencing Data
+# Includes Species, Genus, and Family level analyses
+# 
+# UPDATED: 
+#   - Excludes Homo sapiens reads and recalculates relative abundance
+#   - Ensures all bars sum to 100%
+#   - Includes sample renaming functionality
+#   - Fixed sample ordering
+#   - Enhanced color palette with more distinct colors
+#   - Improved y-axis with more tick marks
+# =============================================================================
+
+# Load required libraries
+library(tidyverse)
+library(RColorBrewer)
+library(scales)
+
+# -----------------------------------------------------------------------------
+# CONFIGURATION - Update this path to your data directory
+# -----------------------------------------------------------------------------
+data_dir <- "/Volumes/Alice/1_METHOD_DEVELOPMENT/Nanopore_runs"
+
+# Number of top taxa to display (increase to reduce "Other" category)
+n_top_taxa <- 15
+
+# Maximum character width for labels before wrapping (adjust as needed)
+label_wrap_width <- 25
+
+# -----------------------------------------------------------------------------
+# SAMPLE NAME MAPPING - Customize your sample names here
+# Format: "barcodeXX" = "Your Custom Name"
+# -----------------------------------------------------------------------------
+sample_name_mapping <- c(
+  "barcode01" = "Chicken 1-Non-enriched",
+  "barcode02" = "Chicken 1-BPW+RVS",
+  "barcode03" = "Chicken 1-Bolton base+CAT",
+  "barcode04" = "Chicken 2-Non-enriched",
+  "barcode05" = "Chicken 2-BPW+RVS",
+  "barcode06" = "Chicken 2-Bolton base+CAT"
+)
+
+# Set to TRUE to use custom names, FALSE to use default barcode names
+use_custom_names <- TRUE
+
+# -----------------------------------------------------------------------------
+# SAMPLE ORDER - Define the exact order samples appear on plots
+# This MUST match your custom names exactly
+# -----------------------------------------------------------------------------
+sample_order_custom <- c(
+  "Chicken 1-Non-enriched",
+  "Chicken 1-BPW+RVS",
+  "Chicken 1-Bolton base+CAT",
+  "Chicken 2-Non-enriched",
+  "Chicken 2-BPW+RVS",
+  "Chicken 2-Bolton base+CAT"
+)
+
+# -----------------------------------------------------------------------------
+# TAXA TO EXCLUDE - Add any taxa you want to exclude from analysis
+# These will be removed BEFORE calculating relative abundance
+# -----------------------------------------------------------------------------
+taxa_to_exclude <- c(
+  "Homo sapiens"
+  # Add more taxa to exclude as needed, e.g.:
+  # "Mus musculus",
+  # "Other contaminant"
+)
+```
+
+```{r functions}
+# -----------------------------------------------------------------------------
+# Function to wrap long text labels
+# -----------------------------------------------------------------------------
+wrap_labels <- function(x, width = 25) {
+  sapply(x, function(label) {
+    if (is.na(label)) return(label)
+    paste(strwrap(label, width = width), collapse = "\n")
+  }, USE.NAMES = FALSE)
+}
+
+# -----------------------------------------------------------------------------
+# Function to get sample name (with optional custom mapping)
+# -----------------------------------------------------------------------------
+get_sample_name <- function(filename, use_custom = TRUE, mapping = NULL) {
+  # Extract barcode from filename
+  barcode <- str_extract(basename(filename), "barcode\\d+")
+  
+  if (use_custom && !is.null(mapping) && barcode %in% names(mapping)) {
+    return(mapping[barcode])
+  } else {
+    # Default: "Barcode 01" format
+    return(str_to_title(str_replace(barcode, "barcode", "Barcode ")))
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Function to read Kraken2 report and extract data at specified taxonomic level
+# Now excludes specified taxa and recalculates relative abundance
+# -----------------------------------------------------------------------------
+read_kraken_report <- function(file_path, tax_rank = "S", 
+                                exclude_taxa = NULL,
+                                use_custom_names = TRUE,
+                                name_mapping = NULL) {
+  # Read the file (tab-separated, no header)
+  df <- read.delim(
+    file_path,
+    header = FALSE,
+    sep = "\t",
+    stringsAsFactors = FALSE,
+    col.names = c("percentage", "reads_clade", "reads_direct", "rank", "taxid", "name")
+  )
+  
+  # Clean up names (trim whitespace)
+  df$name <- trimws(df$name)
+  
+  # Get sample name
+  sample_name <- get_sample_name(file_path, use_custom_names, name_mapping)
+  
+  # Get total reads (from root or sum of all)
+  total_reads <- df %>%
+    filter(rank == "R" | (rank == "U" & name == "unclassified")) %>%
+    summarise(total = sum(reads_clade)) %>%
+    pull(total)
+  
+  # If no root found, use sum of unclassified + classified
+  if (length(total_reads) == 0 || total_reads == 0) {
+    total_reads <- sum(df$reads_clade[df$rank %in% c("U", "R")], na.rm = TRUE)
+  }
+  
+  # Get unclassified reads count
+  unclassified_reads <- df %>%
+    filter(rank == "U") %>%
+    pull(reads_clade)
+  
+  if (length(unclassified_reads) == 0) unclassified_reads <- 0
+  
+  # Get reads for excluded taxa (at species level for accurate counting)
+  excluded_reads <- 0
+  if (!is.null(exclude_taxa) && length(exclude_taxa) > 0) {
+    # For species-level exclusion, we need to get the clade reads
+    excluded_reads <- df %>%
+      filter(name %in% exclude_taxa) %>%
+      summarise(total = sum(reads_clade, na.rm = TRUE)) %>%
+      pull(total)
+    
+    if (is.na(excluded_reads)) excluded_reads <- 0
+    
+    cat("  Sample:", sample_name, "- Excluded", excluded_reads, "reads from:", 
+        paste(exclude_taxa, collapse = ", "), "\n")
+  }
+  
+  # Calculate adjusted total (excluding the removed taxa)
+  adjusted_total <- total_reads - excluded_reads
+  
+  # Get data at specified taxonomic level (excluding specified taxa)
+  taxa <- df %>%
+    filter(rank == tax_rank) %>%
+    filter(!(name %in% exclude_taxa)) %>%
+    mutate(
+      sample = sample_name,
+      reads = reads_clade
+    ) %>%
+    select(sample, name, reads)
+  
+  # Create unclassified entry
+  unclassified <- tibble(
+    sample = sample_name,
+    name = "Unclassified",
+    reads = unclassified_reads
+  )
+  
+  # Combine taxa and unclassified
+  result <- bind_rows(taxa, unclassified)
+  
+  # Recalculate relative abundance based on adjusted total
+  # This ensures percentages sum to 100% after exclusion
+  result <- result %>%
+    group_by(sample) %>%
+    mutate(
+      # Use the sum of remaining reads for normalization
+      total_remaining = sum(reads, na.rm = TRUE),
+      relative_abundance = (reads / total_remaining) * 100
+    ) %>%
+    ungroup() %>%
+    select(sample, name, relative_abundance, reads)
+  
+  return(result)
+}
+
+# -----------------------------------------------------------------------------
+# Function to prepare plot data with Other category
+# Now ensures data sums to 100% and uses custom sample order
+# -----------------------------------------------------------------------------
+prepare_plot_data <- function(all_data, n_top = 15, custom_sample_order = NULL) {
+  # Find top taxa (excluding Unclassified)
+  top_taxa <- all_data %>%
+    filter(name != "Unclassified") %>%
+    group_by(name) %>%
+    summarise(total_abundance = sum(relative_abundance), .groups = "drop") %>%
+    arrange(desc(total_abundance)) %>%
+    head(n_top) %>%
+    pull(name)
+  
+  # Create "Other" category
+  plot_data <- all_data %>%
+    mutate(
+      category = case_when(
+        name == "Unclassified" ~ "Unclassified",
+        name %in% top_taxa ~ name,
+        TRUE ~ "Other"
+      )
+    ) %>%
+    group_by(sample, category) %>%
+    summarise(
+      relative_abundance = sum(relative_abundance), 
+      .groups = "drop"
+    ) %>%
+    rename(name = category)
+  
+  # IMPORTANT: Normalize to exactly 100% per sample
+  plot_data <- plot_data %>%
+    group_by(sample) %>%
+    mutate(
+      sample_total = sum(relative_abundance),
+      relative_abundance = (relative_abundance / sample_total) * 100
+    ) %>%
+    ungroup() %>%
+    select(-sample_total)
+  
+  # Verify normalization
+  check_totals <- plot_data %>%
+    group_by(sample) %>%
+    summarise(total = sum(relative_abundance), .groups = "drop")
+  
+  cat("\nVerification - Sample totals (should all be 100%):\n")
+  print(check_totals)
+  
+  # Define category order
+  category_order <- c(top_taxa, "Other", "Unclassified")
+  
+  plot_data <- plot_data %>%
+    mutate(name = factor(name, levels = rev(category_order))) %>%
+    complete(sample, name, fill = list(relative_abundance = 0))
+  
+  # Sort samples - use custom order if provided
+  if (!is.null(custom_sample_order)) {
+    # Use the provided custom order
+    sample_order <- custom_sample_order[custom_sample_order %in% unique(plot_data$sample)]
+    # Add any samples not in custom order
+    remaining <- setdiff(unique(plot_data$sample), sample_order)
+    if (length(remaining) > 0) {
+      sample_order <- c(sample_order, sort(remaining))
+    }
+    cat("\nUsing custom sample order:\n")
+    for (s in sample_order) cat("  -", s, "\n")
+  } else {
+    # Default: sort numerically by number in name
+    sample_order <- plot_data %>%
+      distinct(sample) %>%
+      mutate(num = as.numeric(str_extract(sample, "\\d+"))) %>%
+      arrange(num, sample) %>%
+      pull(sample)
+  }
+  
+  plot_data <- plot_data %>%
+    mutate(sample = factor(sample, levels = sample_order))
+  
+  return(list(data = plot_data, top_taxa = top_taxa, category_order = category_order))
+}
+
+# -----------------------------------------------------------------------------
+# Function to generate color palette - ENHANCED VERSION
+# -----------------------------------------------------------------------------
+generate_colors <- function(top_taxa, tax_level = "species") {
+  n <- length(top_taxa)
+  
+  # Define a diverse color palette with distinct, visually separable colors
+  # These colors are chosen to be maximally different from each other
+  distinct_colors <- c(
+    "#1f77b4",  # Blue
+    "#ff7f0e",  # Orange
+    "#d62728",  # Red
+    "#9467bd",  # Purple
+    "#8c564b",  # Brown
+    "#e377c2",  # Pink
+    "#17becf",  # Cyan
+    "#bcbd22",  # Yellow-green
+    "#7f7f7f",  # Gray
+    "#aec7e8",  # Light blue
+    "#ffbb78",  # Light orange
+    "#ff9896",  # Light red
+    "#c5b0d5",  # Light purple
+    "#c49c94",  # Tan
+    "#f7b6d2",  # Light pink
+    "#c7c7c7",  # Light gray
+    "#dbdb8d",  # Light yellow-green
+    "#9edae5",  # Light cyan
+    "#393b79",  # Dark blue
+    "#637939"   # Olive
+  )
+  
+  # If we need more colors, repeat the palette
+  if (n > length(distinct_colors)) {
+    distinct_colors <- rep(distinct_colors, ceiling(n / length(distinct_colors)))
+  }
+  
+  # Create named vector
+  colors <- setNames(distinct_colors[1:n], top_taxa)
+  
+  # Override Campylobacter with greens (KEEP ORIGINAL)
+  campylobacter_taxa <- top_taxa[str_detect(top_taxa, regex("Campylobacter", ignore_case = TRUE))]
+  green_shades <- c("#33a02c", "#b2df8a", "#006d2c", "#74c476")
+  for (i in seq_along(campylobacter_taxa)) {
+    colors[campylobacter_taxa[i]] <- green_shades[min(i, length(green_shades))]
+  }
+  
+  # Add Other and Unclassified (KEEP ORIGINAL)
+  colors["Other"] <- "#b0b0b0"
+  colors["Unclassified"] <- "#404040"
+  
+  return(colors)
+}
+
+# -----------------------------------------------------------------------------
+# Function to create stacked bar plot - ENHANCED VERSION
+# -----------------------------------------------------------------------------
+create_stacked_plot <- function(plot_data, colors, title, label_width = 25) {
+  # Create wrapped labels for the legend
+  plot_data <- plot_data %>%
+    mutate(name_wrapped = wrap_labels(as.character(name), width = label_width))
+  
+  # Update colors to use wrapped names
+  colors_wrapped <- colors
+  names(colors_wrapped) <- wrap_labels(names(colors), width = label_width)
+  
+  # Get the factor order with wrapped names
+  name_levels <- levels(plot_data$name)
+  wrapped_levels <- wrap_labels(name_levels, width = label_width)
+  plot_data$name_wrapped <- factor(plot_data$name_wrapped, levels = wrapped_levels)
+  
+  ggplot(plot_data, aes(x = sample, y = relative_abundance, fill = name_wrapped)) +
+    geom_bar(stat = "identity", position = "stack", width = 0.8, color = "white", linewidth = 0.2) +
+    scale_fill_manual(values = colors_wrapped, name = "Taxa") +
+    # ENHANCED: More y-axis breaks (every 10%)
+    scale_y_continuous(
+      expand = c(0, 0), 
+      limits = c(0, 100.5),
+      breaks = seq(0, 100, by = 10),  # Y-axis breaks every 10%
+      minor_breaks = seq(0, 100, by = 5)  # Minor breaks every 5%
+    ) +
+    labs(
+      title = title,
+      x = "Sample",
+      y = "Relative Abundance (%)"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+      axis.text.y = element_text(size = 10),
+      legend.position = "right",
+      legend.text = element_text(size = 8, face = "italic"),
+      legend.title = element_text(size = 10, face = "bold"),
+      legend.key.height = unit(1.2, "lines"),
+      plot.title = element_text(face = "bold", size = 14),
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_line(color = "gray90", linewidth = 0.5),  # Add horizontal gridlines
+      panel.grid.minor.y = element_line(color = "gray95", linewidth = 0.25)  # Add minor gridlines
+    ) +
+    guides(fill = guide_legend(reverse = TRUE, ncol = 1))
+}
+
+# -----------------------------------------------------------------------------
+# Function to create heatmap
+# -----------------------------------------------------------------------------
+create_heatmap <- function(plot_data, category_order, title, label_width = 25) {
+  # Create wrapped labels for y-axis
+  heatmap_data <- plot_data %>%
+    mutate(
+      name = factor(name, levels = category_order),
+      name_wrapped = wrap_labels(as.character(name), width = label_width)
+    )
+  
+  # Set factor order for wrapped names
+  wrapped_order <- wrap_labels(category_order, width = label_width)
+  heatmap_data$name_wrapped <- factor(heatmap_data$name_wrapped, levels = wrapped_order)
+  
+  ggplot(heatmap_data, aes(x = sample, y = name_wrapped, fill = relative_abundance)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(
+      aes(label = ifelse(relative_abundance > 0.5, sprintf("%.1f", relative_abundance), "")),
+      size = 2.5,
+      color = ifelse(heatmap_data$relative_abundance > 50, "white", "black")
+    ) +
+    scale_fill_gradient(
+      low = "#FFFFCC",
+      high = "#800026",
+      name = "Relative\nAbundance (%)",
+      limits = c(0, 100)
+    ) +
+    labs(
+      title = title,
+      x = "Sample",
+      y = "Taxa"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+      axis.text.y = element_text(size = 9, face = "italic"),
+      legend.position = "right",
+      plot.title = element_text(face = "bold", size = 14),
+      panel.grid = element_blank()
+    )
+}
+```
+
+# Data Loading
+
+```{r read_files}
+# -----------------------------------------------------------------------------
+# Read all Kraken2 report files
+# -----------------------------------------------------------------------------
+files <- list.files(
+  path = data_dir,
+  pattern = "kraken2\\.report$",
+  full.names = TRUE
+)
+
+cat("Found", length(files), "Kraken2 report files:\n")
+for (f in files) {
+  cat("  -", basename(f), "\n")
+}
+
+cat("\n")
+cat("Taxa being excluded from analysis:\n")
+for (t in taxa_to_exclude) {
+  cat("  -", t, "\n")
+}
+cat("\n")
+
+if (use_custom_names) {
+  cat("Using custom sample names:\n")
+  for (bc in names(sample_name_mapping)) {
+    cat("  ", bc, "->", sample_name_mapping[bc], "\n")
+  }
+} else {
+  cat("Using default barcode names\n")
+}
+
+cat("\nSample order for plots:\n")
+for (s in sample_order_custom) {
+  cat("  -", s, "\n")
+}
+```
+
+# Species Level Analysis
+
+```{r species_analysis, fig.width=14, fig.height=8}
+# =============================================================================
+# SPECIES LEVEL ANALYSIS
+# =============================================================================
+cat("\n", paste(rep("=", 70), collapse = ""), "\n")
+cat("SPECIES LEVEL ANALYSIS (excluding:", paste(taxa_to_exclude, collapse = ", "), ")\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+
+# Read species data with exclusions
+species_data <- map_dfr(files, ~read_kraken_report(
+  .x, 
+  tax_rank = "S",
+  exclude_taxa = taxa_to_exclude,
+  use_custom_names = use_custom_names,
+  name_mapping = sample_name_mapping
+))
+
+# Prepare plot data
+species_prep <- prepare_plot_data(species_data, n_top = n_top_taxa, custom_sample_order = sample_order_custom)
+species_plot_data <- species_prep$data
+species_top <- species_prep$top_taxa
+species_order <- species_prep$category_order
+
+cat("\nTop", n_top_taxa, "Species (after exclusions):\n")
+for (i in seq_along(species_top)) {
+  total <- sum(species_data$relative_abundance[species_data$name == species_top[i]])
+  cat(sprintf("  %2d. %s (%.2f%%)\n", i, species_top[i], total))
+}
+
+# Generate colors
+species_colors <- generate_colors(species_top, "species")
+
+# Create plots
+p_species_stacked <- create_stacked_plot(
+  species_plot_data, 
+  species_colors,
+  paste("Relative Abundance of Top", n_top_taxa, "Bacterial Species"),
+  label_width = label_wrap_width
+)
+
+p_species_heatmap <- create_heatmap(
+  species_plot_data,
+  species_order,
+  paste("Heatmap of Top", n_top_taxa, "Bacterial Species"),
+  label_width = label_wrap_width
+)
+
+# Display plots
+print(p_species_stacked)
+print(p_species_heatmap)
+
+# Save plots
+ggsave("species_abundance_stacked.png", plot = p_species_stacked, width = 14, height = 8, dpi = 300)
+ggsave("species_abundance_heatmap.png", plot = p_species_heatmap, width = 12, height = 10, dpi = 300)
+cat("\nSaved: species_abundance_stacked.png\n")
+cat("Saved: species_abundance_heatmap.png\n")
+```
+
+# Genus Level Analysis
+
+```{r genus_analysis, fig.width=14, fig.height=8}
+# =============================================================================
+# GENUS LEVEL ANALYSIS
+# =============================================================================
+cat("\n", paste(rep("=", 70), collapse = ""), "\n")
+cat("GENUS LEVEL ANALYSIS\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+
+# For genus level, we exclude "Homo" instead of "Homo sapiens"
+genus_exclude <- c("Homo")
+
+# Read genus data
+genus_data <- map_dfr(files, ~read_kraken_report(
+  .x, 
+  tax_rank = "G",
+  exclude_taxa = genus_exclude,
+  use_custom_names = use_custom_names,
+  name_mapping = sample_name_mapping
+))
+
+# Prepare plot data
+genus_prep <- prepare_plot_data(genus_data, n_top = n_top_taxa, custom_sample_order = sample_order_custom)
+genus_plot_data <- genus_prep$data
+genus_top <- genus_prep$top_taxa
+genus_order <- genus_prep$category_order
+
+cat("\nTop", n_top_taxa, "Genera:\n")
+for (i in seq_along(genus_top)) {
+  total <- sum(genus_data$relative_abundance[genus_data$name == genus_top[i]])
+  cat(sprintf("  %2d. %s (%.2f%%)\n", i, genus_top[i], total))
+}
+
+# Generate colors
+genus_colors <- generate_colors(genus_top, "genus")
+
+# Create plots
+p_genus_stacked <- create_stacked_plot(
+  genus_plot_data, 
+  genus_colors,
+  paste("Relative Abundance of Top", n_top_taxa, "Bacterial Genera"),
+  label_width = label_wrap_width
+)
+
+p_genus_heatmap <- create_heatmap(
+  genus_plot_data,
+  genus_order,
+  paste("Heatmap of Top", n_top_taxa, "Bacterial Genera"),
+  label_width = label_wrap_width
+)
+
+# Display plots
+print(p_genus_stacked)
+print(p_genus_heatmap)
+
+# Save plots
+ggsave("genus_abundance_stacked.png", plot = p_genus_stacked, width = 14, height = 8, dpi = 300)
+ggsave("genus_abundance_heatmap.png", plot = p_genus_heatmap, width = 12, height = 10, dpi = 300)
+cat("\nSaved: genus_abundance_stacked.png\n")
+cat("Saved: genus_abundance_heatmap.png\n")
+```
+
+# Family Level Analysis
+
+```{r family_analysis, fig.width=14, fig.height=8}
+# =============================================================================
+# FAMILY LEVEL ANALYSIS
+# =============================================================================
+cat("\n", paste(rep("=", 70), collapse = ""), "\n")
+cat("FAMILY LEVEL ANALYSIS\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+
+# For family level, exclude "Hominidae" instead of "Homo sapiens"
+family_exclude <- c("Hominidae")
+
+# Read family data
+family_data <- map_dfr(files, ~read_kraken_report(
+  .x, 
+  tax_rank = "F",
+  exclude_taxa = family_exclude,
+  use_custom_names = use_custom_names,
+  name_mapping = sample_name_mapping
+))
+
+# Prepare plot data
+family_prep <- prepare_plot_data(family_data, n_top = n_top_taxa, custom_sample_order = sample_order_custom)
+family_plot_data <- family_prep$data
+family_top <- family_prep$top_taxa
+family_order <- family_prep$category_order
+
+cat("\nTop", n_top_taxa, "Families:\n")
+for (i in seq_along(family_top)) {
+  total <- sum(family_data$relative_abundance[family_data$name == family_top[i]])
+  cat(sprintf("  %2d. %s (%.2f%%)\n", i, family_top[i], total))
+}
+
+# Generate colors
+family_colors <- generate_colors(family_top, "family")
+
+# Create plots
+p_family_stacked <- create_stacked_plot(
+  family_plot_data, 
+  family_colors,
+  paste("Relative Abundance of Top", n_top_taxa, "Bacterial Families"),
+  label_width = label_wrap_width
+)
+
+p_family_heatmap <- create_heatmap(
+  family_plot_data,
+  family_order,
+  paste("Heatmap of Top", n_top_taxa, "Bacterial Families"),
+  label_width = label_wrap_width
+)
+
+# Display plots
+print(p_family_stacked)
+print(p_family_heatmap)
+
+# Save plots
+ggsave("family_abundance_stacked.png", plot = p_family_stacked, width = 14, height = 8, dpi = 300)
+ggsave("family_abundance_heatmap.png", plot = p_family_heatmap, width = 12, height = 10, dpi = 300)
+cat("\nSaved: family_abundance_stacked.png\n")
+cat("Saved: family_abundance_heatmap.png\n")
+```
+
+# Summary Tables
+
+```{r summary_tables}
+# =============================================================================
+# SAVE SUMMARY TABLES
+# =============================================================================
+
+# Species summary
+species_summary <- species_plot_data %>%
+  pivot_wider(names_from = name, values_from = relative_abundance) %>%
+  arrange(sample)
+write_csv(species_summary, "species_abundance_summary.csv")
+
+# Genus summary
+genus_summary <- genus_plot_data %>%
+  pivot_wider(names_from = name, values_from = relative_abundance) %>%
+  arrange(sample)
+write_csv(genus_summary, "genus_abundance_summary.csv")
+
+# Family summary
+family_summary <- family_plot_data %>%
+  pivot_wider(names_from = name, values_from = relative_abundance) %>%
+  arrange(sample)
+write_csv(family_summary, "family_abundance_summary.csv")
+
+cat("\nSummary tables saved:\n")
+cat("  - species_abundance_summary.csv\n")
+cat("  - genus_abundance_summary.csv\n")
+cat("  - family_abundance_summary.csv\n")
+```
+
+## Species Summary Table
+
+```{r print_species_summary}
+cat("\n", paste(rep("=", 70), collapse = ""), "\n")
+cat("SPECIES SUMMARY (Homo sapiens excluded)\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+print(species_summary, n = Inf, width = Inf)
+```
+
+## Genus Summary Table
+
+```{r print_genus_summary}
+cat("\n", paste(rep("=", 70), collapse = ""), "\n")
+cat("GENUS SUMMARY (Homo excluded)\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+print(genus_summary, n = Inf, width = Inf)
+```
+
+## Family Summary Table
+
+```{r print_family_summary}
+cat("\n", paste(rep("=", 70), collapse = ""), "\n")
+cat("FAMILY SUMMARY (Hominidae excluded)\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+print(family_summary, n = Inf, width = Inf)
+
+cat("\n✓ All outputs generated successfully!\n")
+cat("\nNote: Relative abundances have been recalculated after excluding human reads.\n")
+cat("All bars should now sum to exactly 100%.\n")
+```
+
+---
+
+## Key Enhancements in This Version
+
+1. **Enhanced Y-axis**: Y-axis now shows tick marks at every 10% (0, 10, 20, ... 100) with minor gridlines every 5%
+
+2. **Improved Color Palette**: 
+   - 20 distinct, maximally different colors for better visual separation
+   - Campylobacter species retain their original green colors
+   - "Other" and "Unclassified" categories retain their original gray tones
+   
+3. **Better Readability**: 
+   - Horizontal gridlines added to make reading exact percentages easier
+   - White borders between stacked bars for clearer separation
+
+4. **HTML Output**: This R Markdown file generates an HTML report with:
+   - Table of contents for easy navigation
+   - Code folding option
+   - Professional theme (Cosmo)
+   - All plots and tables embedded
+
+## How to Use
+
+1. Update the `data_dir` variable in the setup chunk to point to your data directory
+2. Customize sample names in the `sample_name_mapping` if needed
+3. Knit the document to HTML: `rmarkdown::render("bacterial_abundance_analysis_enhanced.Rmd")`
+4. Or use the "Knit" button in RStudio
