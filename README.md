@@ -1,4 +1,4 @@
-# 🧬 ONT Metagenomics Pipeline
+# 🧬 ONT Metagenomics Pipeline - Spiked samples - method development 
 
 > Oxford Nanopore long-read metagenomic analysis pipeline for NeSI HPC — from raw basecalled reads to taxonomically-annotated AMR gene tables.
 
@@ -31,6 +31,7 @@ Raw ONT reads
 | 1b | `job1_2.sl` | `1.QC_Raw` | 8h | 64 GB | 6 | Merge barcodes then run NanoPlot + MultiQC with HTML dashboard |
 | 2 | `job2.sl` | `2.Filtering-hostremove` | 24h | 200 GB | 8 | Adapter trim, quality filter, host removal, post-filter QC |
 | 3 | `job3.sl` | `3-assembly-contig_analysis` | 8h | 64 GB | 6 | Assembly, contig stats, mapping, taxonomy, AMR, integration |
+| — | `Nanopore_spiked_run_analysis.Rmd` | *(R Markdown)* | — | — | — | Interactive visualisation of Kraken2 taxonomy results |
 
 > **Script 1a vs 1b:** These are alternative approaches to the same QC step — run one, not both. Script 1b includes barcode merging and generates an HTML navigation dashboard; Script 1a additionally runs nanoQC but assumes reads are pre-merged.
 
@@ -346,6 +347,67 @@ flye_assembly/
 
 ---
 
+## Visualisation — `Nanopore_spiked_run_analysis.Rmd`
+
+An R Markdown notebook for interactive visualisation of taxonomic composition from the Kraken2 outputs produced by Script 3. Knitting the document generates a self-contained HTML report with plots and summary tables embedded.
+
+### What it produces
+
+At three taxonomic levels — **species**, **genus**, and **family** — the notebook generates:
+
+- **Stacked bar charts** — relative abundance (%) per sample, with the top 15 taxa shown individually and the remainder grouped as *Other*
+- **Heatmaps** — abundance as a colour gradient across samples and taxa, with percentage labels on tiles > 0.5%
+- **Summary CSV tables** — one per taxonomic level, with samples as rows and taxa as columns
+
+**Output files:**
+
+```
+species_abundance_stacked.png
+species_abundance_heatmap.png
+species_abundance_summary.csv
+
+genus_abundance_stacked.png
+genus_abundance_heatmap.png
+genus_abundance_summary.csv
+
+family_abundance_stacked.png
+family_abundance_heatmap.png
+family_abundance_summary.csv
+```
+
+### Requirements
+
+```r
+install.packages(c("tidyverse", "RColorBrewer", "scales", "rmarkdown"))
+```
+
+### Configuration
+
+Before knitting, update the following variables in the `setup` chunk:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `data_dir` | Path to directory containing `*.kraken2.report` files | `/Volumes/Alice/1_METHOD_DEVELOPMENT/Nanopore_runs` |
+| `n_top_taxa` | Number of taxa shown individually (rest → *Other*) | `15` |
+| `taxa_to_exclude` | Taxa removed before recalculating relative abundances | `"Homo sapiens"` |
+| `sample_name_mapping` | Maps barcode IDs to readable sample names | 6 chicken samples (see file) |
+| `use_custom_names` | Toggle custom sample name mapping on/off | `TRUE` |
+| `sample_order_custom` | Explicit left-to-right order of samples on plots | matches mapping order |
+
+> **Note on human exclusion:** Human reads (*Homo sapiens* at species level, *Homo* at genus, *Hominidae* at family) are excluded before relative abundances are recalculated, so all bars sum to exactly 100% of non-human classified reads.
+
+### Usage
+
+**In RStudio:** open the file and click *Knit*, or run from the R console:
+
+```r
+rmarkdown::render("Nanopore_spiked_run_analysis.Rmd")
+```
+
+The output HTML report (`Nanopore_spiked_run_analysis.html`) will be written to the same directory as the `.Rmd` file and includes a floating table of contents, collapsible code blocks, and all plots and tables embedded inline.
+
+---
+
 ## Directory Structure
 
 Full expected layout after running the complete pipeline:
@@ -374,6 +436,8 @@ working_directory/
 │   ├── combined_results_2/
 │   └── logs/
 │
+├── Nanopore_spiked_run_analysis.Rmd       # R Markdown visualisation notebook
+├── Nanopore_spiked_run_analysis.html      # rendered HTML report (after knitting)
 ├── combined_host_refs.fna                 # auto-generated host reference
 ├── GCF_016699485.2_*.fna                 # chicken reference (user-provided)
 ├── DCS.fasta                             # control reference (user-provided)
